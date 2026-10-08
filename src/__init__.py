@@ -1,0 +1,1 @@
+"""Marketplace notification example package."""
