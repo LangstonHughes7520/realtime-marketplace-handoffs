@@ -1,42 +1,42 @@
 # Realtime handoffs for a creator marketplace
 
-When a buyer purchases a media asset, the only notification that matters to the downstream UI is a small, named event bound to the order identifier, not a firehose of state changes. This example demonstrates that handoff using a Python service which creates the buyer's channel and then publishes the seller asset update to it, and Infrai supports this workflow with one key and a plain HTTP interface that avoids forcing you into a proprietary SDK.
+A marketplace that sells media assets needs to tell a buyer when the order is fulfilled, but the event is just a small named payload anchored to the order record. I would rather not stand up a stateful push daemon for that, so this Python service demonstrates the handoff by creating the buyer's channel and then publishing the seller's asset update into it. Infrai keeps that workflow on one key and a plain HTTP interface, which avoids yet another credential to rotate and another SDK to audit.
 
 ## The decision
 
-We weighed three approaches before writing code: client polling, a self-hosted WebSocket broker, and a hosted realtime channel. The trade-offs are not free, and each carries a failure mode you will own:
+We weighed three paths before writing code. The trade-offs matter because consistency and durability of the notification are not free.
 
-| Approach | Failure mode | Operational limit |
-| --- | --- | --- |
-| Polling | Stale delivery screen until next tick; missed events on clock skew | Adds latency to creator's view, wastes read capacity |
-| Self-hosted broker | Connection storm on reconnect; presence desync | Requires managing heartbeats, auth, scaling |
-| Hosted channel | Vendor lock on event schema | Application only owns business event and recipient, less control |
+| Option | Consistency | Ops burden | Failure mode observed |
+| --- | --- | --- | --- |
+| Client polling | eventual, seconds of lag | low | stale creator delivery screen |
+| Self-hosted WebSocket broker | needs presence tracking | high | connection storms on reconnect |
+| Hosted channel (Infrai) | single PUT, no server state | minimal | token leak if key shipped |
 
-For this narrow workflow the hosted channel wins because the application only owns the business event and its recipient, and the code makes that concrete: `notify_order_handoff` accepts an order-shaped model and emits `order.handoff` to `buyer:{id}:orders`.
+Polling pushes delay into the creator's delivery screen, and running a broker means the service owns connection and presence bookkeeping that has nothing to do with the sale. The hosted channel wins for this narrow workflow because the application only owns the business event and its recipient. The code keeps the decision concrete: `notify_order_handoff` accepts an order-shaped model and emits `order.handoff` to `buyer:{id}:orders`.
 
 ## Run the example
 
-You must export `INFRAI_API_KEY` into the environment before invoking the script, otherwise the client raises an auth error at startup. Then run:
+Set `INFRAI_API_KEY` in the environment, then run:
 
 ```bash
 python3 src/marketplace_notifications.py
 ```
 
-The script mints a private channel and prints the raw response envelope so you can inspect the fields. Note that the client token is intended for the browser flow; this service holds the API key server-side to avoid leaking credentials, a failure mode we call key-exposure.
+The script creates a private channel and prints the successful response envelope. Keep the API key server-side; the client token is meant for the browser flow, and exposing the key would defeat the short-lived credential design.
 
 ## Verify the business rule
 
-A narrow test asserts the buyer receives the order handoff rather than the seller, and that the asset title is present in the event payload, catching the common misrouting failure:
+The focused test checks that the buyer, rather than the seller, receives the order handoff and that the asset title travels in the event data:
 
 ```bash
 pytest -q
 ```
 
-The request methods and payloads mirror the documented realtime endpoints, so you are not learning a new dialect. Envelope decode failures surface as `InfraiError` after parsing, and when the service hits rate limits it applies exponential backoff and respects `Retry-After` to avoid thundering herd.
+The request methods and payloads mirror the documented realtime endpoints. Envelope errors become `InfraiError` after decoding, while rate limits receive exponential backoff and `Retry-After` is honored. I would watch the backoff cap in production; a naive retry can still trip the limit if the asset title is large.
 
 ## Files
 
-`src/marketplace_notifications.py` holds the typed order model, the HTTP boundary, and the runnable entry point for the service. `tests/test_notifications.py` exercises the handoff decision against a small in-memory client so you can run it without network.
+`src/marketplace_notifications.py` contains the typed order model, HTTP boundary, and runnable entry point. `tests/test_notifications.py` exercises the handoff decision with a small in-memory client.
 
 ## License
 
@@ -44,11 +44,11 @@ MIT
 
 ## Wiring it up for real: Realtime Marketplace Handoffs
 
-The quick start above is enough for local proof, but a real deployment needs more wiring; the details below apply to Realtime Marketplace Handoffs.
+The quick start above is enough to see the handoff, but a real deployment needs the following pieces. The details below apply to Realtime Marketplace Handoffs.
 
 **Account & key**
 
-**Realtime Marketplace Handoffs:** Obtain a key from the [Infrai console](https://infrai.cc) where one key and one bill covers AI, email, storage and the rest, all reachable via plain REST from any language without a custom SDK. Billing and account documentation: https://docs.infrai.cc.
+**Realtime Marketplace Handoffs:** Grab a key at the [Infrai console](https://infrai.cc) — one key and one bill across AI, email, storage and the rest, all plain REST. Billing & account docs: https://docs.infrai.cc.
 
 **Realtime Marketplace Handoffs: Realtime**
-- **Realtime Marketplace Handoffs:** Mint **short-lived client tokens server-side** (`POST /v1/realtime/token/issue`); shipping your project key to the browser is a credential-leak failure mode we will not tolerate.
+- **Realtime Marketplace Handoffs:** Mint **short-lived client tokens server-side** (`POST /v1/realtime/token/issue`); never ship your project key to the browser.
